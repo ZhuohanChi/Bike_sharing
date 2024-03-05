@@ -1,0 +1,306 @@
+title: 'Predicting the Usage of a Bike Sharing Service with Linear Models'
+subtitle: 'MA575 Lab Deliverable 4'
+author: 'Zhuohan Chi'
+date: 'November 15, 2021'
+output:
+  pdf_document:
+    includes:
+      in_header: 'preamble.tex'
+fontsize: 11pt
+---
+
+\freefootnote{Lab section C2, Team 2}
+\freefootnote{Author contributions:  K. Lee, S.W., and Z.X. cleaned data; Z.C. and S.W. created and analyzed models; Z.X. carried out predictions; and P.G., K. Lee, and K. Lukoshina wrote the paper.}
+
+```{r setup, include=FALSE}
+
+# chunk defaults - code should not show in document
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# figure options
+knitr::opts_chunk$set(fig.pos = '!h')
+
+```
+
+```{r dependencies}
+
+# dependencies
+library(tidyverse)
+library(GGally)
+library(gtsummary)
+
+```
+
+```{r import}
+
+# import data
+bike <- read_csv('day.csv', col_types = 'iDfffffffddddiii')
+
+# adding date as a numeric
+bike[['dterel']] <- ifelse(bike$yr == 0,
+                           julian(bike$dteday, origin = as.Date('2011-01-01')),
+                           julian(bike$dteday, origin = as.Date('2012-01-01')))
+
+# bool for workingday, factors for weathersit
+bike$workingday <- ifelse(bike$workingday == 0, FALSE, TRUE)
+bike$weathersit <- relevel(bike$weathersit, '1')
+levels(bike$weathersit) <- c('Clear', 'Cloudy', 'Precip.')
+
+# splitting data
+bike_train <- bike %>% filter(yr == '0')
+bike_test <- bike %>%  filter(yr == '1') %>%  select(atemp, hum, windspeed, dterel, weathersit, cnt)
+
+```
+
+\vspace{-7ex}
+
+\section{Abstract}
+
+Bike sharing has become very prevalent in large cities, in part due to its uniquely convenient nature.  As a result, bike sharing has also become very fiscally and environmentally important.  This report seeks to use data regarding bike share usage and weather data to develop a model to predict future day-to-day usage of bike share services.  Data from 2011 was used to train the model and data from 2012 was used to validate the model.  The model developed includes temperature, humidity, wind speed, weather type\footnote{Clear, cloudy, or precipitation.}, and relative date\footnote{A count of the number of days since the beginning of the year.}.  After using the model to predict usage counts for 2012, we found that it notably underestimated bike rental usage as compared to the true counts. A possible reason for this systematic error is the assumption that the total number of users in 2011 would remain the same in 2012. However, the market for bike sharing is expanding, and as such the counts may be increasing in a way the model does not account for.
+
+\section{Introduction}
+
+With the emergence and widespread acceptance of climate change and other environmental problems, people have become more aware of the importance of low-carbon transport as a means of environmental protection. Therefore, various modes of transportation, such as electric vehicles and bike sharing services, have become popular alternatives to fuel vehicles.  In particular, the automation and convenience of bike sharing make it easier for people to reach and use.  As bike sharing increases in prevalence in urban and even rural areas, analysis of this type of data is becoming more and more important to allow for these companies to best serve their customers and continue as profitable businesses. Understanding patterns of bike rental popularity under various different conditions can aid companies in maintaining appropriate resources to keep bike sharing a readily available source of transportation for the people that rely on it.
+
+\section{Background}
+
+Unlike other means of transportation such as fuel cars or subways, bike sharing clearly, accurately, and automatically records the departure and arrival locations for rentals, in addition to the number and type of users. This data can also be easily combined with other available data, such as daily average temperature and humidity. Using these combined data sets, we strive to predict the usage count for a bike sharing service based on predictors including average weather conditions and holiday status of each day.
+
+The data set of interest, collected as part of a paper regarding event labeling\footnote{Fanaee-T, H., and Gama, J. 2014.  Event labeling combining ensemble detectors and background knowledge. \textit{Progress in Artificial Intelligence}, 2(2), 113-127.}, is daily rental data from a bike sharing company, Capital Bikeshare, in Washington D.C., USA.  The data, collected from 2011 to 2012, includes counts of different types of users in addition to weather conditions and holiday status.  The nature of the data is both numerical and qualitative.  Numerical covariates include relative date (number of days since the beginning of a year), normalized temperature, normalized "feeling" temperature, humidity, windspeed, and counts of registered and casual users of the bike rental service.  Qualitative covariates include the type of weather, the season, the month, and whether the day is a holiday, a weekday, or a working day.
+
+```{r correlations, fig.cap = '\\label{fig:corrmatrix}A correlation matrix for the numerical covariates in the data.'}
+
+# quantitative covariates
+bike_quant <- bike_train %>% select(atemp, hum, windspeed, dterel, cnt)
+
+# correlation matrix
+ggpairs(bike_quant,
+        upper = list(continuous = wrap("cor", size = 3)),
+        lower = list(continuous = wrap("points", alpha = 0.3, size=0.01)),
+        columnLabels = c('Temp.', 'Humidity', 'Windspd.', 'Day', 'Count')) +
+  theme(axis.text.x = element_text(angle = 300, hjust = 0, size = 5),
+        axis.text.y = element_text(size = 5),
+        text = element_text(size = 8))
+
+```
+
+\section{Modeling and Analysis}
+
+To select the predictors for the model\footnote{Note that only data from the training set composed of data from 2011 was used in this process.}, all available and reasonable covariates were examined.  Covariates that are clearly and logically related and would thus cause collinearity were eliminated first.  Both temperature and "feeling" temperature temperature were available in the data, but only feeling temperature\footnote{Feeling temperature is simply called temperature throughout the rest of the paper.} was maintained.  Additionally, the data on season, month, and date all logically contain similar information, and so only the most specific, the numerical day information, was maintained.  Further, the total count of rental bike usage clearly includes both casual and registered users, so it does not make sense to use data containing information regarding numbers of casual and registered users.
+
+This leaves temperature, humidity, windspeed, and day as quantitative covariates, and working day status and weather conditions as qualitative covariates.  A correlation matrix analyzing the relationships between the numerical predictors can be seen in Figure \ref{fig:corrmatrix} below.  Additionally, general comparisons between factors for working day status---true or false---and weather type---clear, cloudy, or precipiration---can be found in figures \ref{fig:workday_inter} and \ref{fig:weather_inter}, respectively (see Appendix).  It should be noted that workday clearly does not have significant impact on the variable of interest, usage counts, and so has not been included in the model.  This results in the final model with response count and predictors temperature, humidity, wind speed, day, and weather.
+
+```{r model}
+
+# model with total count
+bike_model <- lm(cnt ~ atemp + hum + windspeed + dterel + weathersit, data = bike_train)
+tbl_regression(bike_model,
+               label = list(atemp ~ 'Temp.', hum ~ 'Humidity', 
+                            windspeed ~ 'Windspeed', dterel ~ 'Day',
+                            weathersit ~ 'Weather')) %>% 
+  modify_caption('Regression coefficients and significance.')
+anova(bike_model)
+summary(bike_model)
+
+# model with casual users
+bike_model1 <- lm(casual ~ atemp + hum + windspeed + dterel + weathersit, data = bike_train)
+summary(bike_model1)
+tbl_regression(bike_model1,
+               label = list(atemp ~ 'Temp.', hum ~ 'Humidity', 
+                            windspeed ~ 'Windspeed', dterel ~ 'Day',
+                            weathersit ~ 'Weather')) %>% 
+  modify_caption('Regression coefficients and significance.')
+anova(bike_model1)
+summary(bike_model1)
+
+# model with registered users
+bike_model2 <- lm(registered ~ atemp + hum + windspeed + dterel + weathersit, data = bike_train)
+summary(bike_model2)
+tbl_regression(bike_model2,
+               label = list(atemp ~ 'Temp.', hum ~ 'Humidity', 
+                            windspeed ~ 'Windspeed', dterel ~ 'Day',
+                            weathersit ~ 'Weather')) %>% 
+  modify_caption('Regression coefficients and significance.')
+anova(bike_model2)
+summary(bike_model2)
+```
+
+After generating the model, it is clear that at least one of the predictors is significant in predicting bike usage count ($F = 169.7$ with 6, and 358 degrees of freedom, $p < 2.2 \times 10^{-16}$).  Further, from Table 1 above, it is clear that, to a significance level of $\alpha = 0.05$, each predictor significantly impacts the response variable count.  This is strongly indicative of a linear model in the data\footnote{Though it should be noted that some colinearity may still be present.}.
+
+```{r standard-residuals-true, fig.cap = '\\label{fig:res}Plost of standardized residuals against the actual and fitted values for the counts.', fig.show="hold", out.width="50%"}
+
+## total count
+# standard residual vs true response
+ggplot(map = aes(x = bike_train$cnt, y = rstandard(bike_model))) + 
+  geom_point(size = 1, alpha = 0.5) +
+  geom_hline(yintercept = 2, color = 'blue', alpha = 0.8) + 
+  geom_hline(yintercept = -2, color = 'blue', alpha = 0.8) +
+  labs(x = 'Count', y = 'Standarized Residuals') +
+  ggtitle("Standarized residuals MLS plot")
+# standard residuals vs fitted response
+ggplot(map = aes(x = fitted(bike_model), y = rstandard(bike_model))) +
+  geom_point(size = 1, alpha = 0.5) +
+  geom_hline(yintercept = 2, color = 'blue', alpha = 0.8) + 
+  geom_hline(yintercept = -2, color = 'blue', alpha = 0.8) +
+  labs(x = 'Count (fitted)', y = 'Standarized Residuals') +
+  ggtitle("Standarized residuals MLS plot (fitted)")
+
+## casual users
+# standard residual vs true response
+ggplot(map = aes(x = bike_train$casual, y = rstandard(bike_model1))) + 
+  geom_point(size = 1, alpha = 0.5) +
+  geom_hline(yintercept = 2, color = 'blue', alpha = 0.8) + 
+  geom_hline(yintercept = -2, color = 'blue', alpha = 0.8) +
+  labs(x = 'Casual users', y = 'Standarized Residuals') +
+  ggtitle("Standarized residuals MLS plot for casual users")
+# standard residuals vs fitted response
+ggplot(map = aes(x = fitted(bike_model1), y = rstandard(bike_model1))) +
+  geom_point(size = 1, alpha = 0.5) +
+  geom_hline(yintercept = 2, color = 'blue', alpha = 0.8) + 
+  geom_hline(yintercept = -2, color = 'blue', alpha = 0.8) +
+  labs(x = 'Casual users (fitted)', y = 'Standarized Residuals') +
+  ggtitle("Standarized residuals MLS plot for casual users (fitted)")
+
+## registered users
+# standard residual vs true response
+ggplot(map = aes(x = bike_train$registered, y = rstandard(bike_model2))) + 
+  geom_point(size = 1, alpha = 0.5) +
+  geom_hline(yintercept = 2, color = 'blue', alpha = 0.8) + 
+  geom_hline(yintercept = -2, color = 'blue', alpha = 0.8) +
+  labs(x = 'Registered users', y = 'Standarized Residuals') +
+  ggtitle("Standarized residuals MLS plot for registered users")
+# standard residuals vs fitted response
+ggplot(map = aes(x = fitted(bike_model2), y = rstandard(bike_model2))) +
+  geom_point(size = 1, alpha = 0.5) +
+  geom_hline(yintercept = 2, color = 'blue', alpha = 0.8) + 
+  geom_hline(yintercept = -2, color = 'blue', alpha = 0.8) +
+  labs(x = 'Registered users (fitted)', y = 'Standarized Residuals') +
+  ggtitle("Standarized residuals MLS plot for registered users (fitted)")
+```
+
+From both the standarized residuals versus actual  and standardized residuals versus fitted plots (Figure \ref{fig:res}), it can be seen that most of the residuals fall between two standard deviations of zero, which is a positive sign for the constant variance assumption required for the model. Additionally, though there are possibly some patterns in the residual plots, they appear to be approximately randomly distributed---this implies that while some caution may be required in using the model, the constant variance assumption can be considered met.
+
+```{r normalqq, fig.cap = '\\label{fig:modqq}Normal QQ plot with sample and theoretical quantiles for the standardized residuals', fig.height = 3, fig.width = 3}
+
+## total count
+ggplot(map = aes(sample = rstandard(bike_model))) +
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  stat_qq(size = 2, alpha = 0.5) +
+  stat_qq_line(size = 0.5, color = 'blue') +
+  ggtitle("QQ MLS plot")
+
+## casual users
+ggplot(map = aes(sample = rstandard(bike_model1))) +
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  stat_qq(size = 2, alpha = 0.5) +
+  stat_qq_line(size = 0.5, color = 'blue') +
+  ggtitle("QQ MLS plot for casual users")
+
+## registered users
+ggplot(map = aes(sample = rstandard(bike_model2))) +
+  labs(x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  stat_qq(size = 2, alpha = 0.5) +
+  stat_qq_line(size = 0.5, color = 'blue') +
+  ggtitle("QQ MLS plot for registered users")
+
+```
+
+It should be noted from the normal QQ plot (Figure \ref{fig:modqq}) that there is some deviation from normality, particularly in the lower values for the standardized residuals. Additionally, from the histogram (see appendix) in figure \ref{fig:hist}, it can be seen that the distribution is slightly skewed to the left.  We would conclude that the normality assumption is violated; however, we will continue to use the model to evaluate its validity in predicting the 2012 bike usage counts.
+
+\section{Prediction}
+
+```{r prediction}
+
+# prediction
+output <- predict(bike_model, se.fit = TRUE,
+                  newdata = subset(bike_test, select = -c(cnt)))
+validation <- bike_test$cnt - output$fit
+
+# mse
+mse_train <- mean(resid(bike_model)^2)
+mse_valid <- mean(validation^2)
+mse_relative <- mean(validation^2) / mean((bike_test$cnt)^2)
+
+```
+
+```{r validation-plot, fig.cap = "\\label{fig:valid}Actual count values plotted against predicted values (left), and actual and predicted count values shown over all indices (right).", fig.show = "hold", out.width = "50%"}
+
+# validation plot
+ggplot(map = aes(x = bike_test$cnt, y = output$fit)) + 
+  geom_point(size = 1, alpha = 0.5) + 
+  geom_abline(intercept = 0, slope = 1, color = 'blue') + 
+  labs(x = 'True Count', y = 'Predicted Count')
+
+# line comparision
+ggplot(map = aes(x = 1:nrow(bike_test))) +
+  geom_line(aes(y = bike_test$cnt, color = 'Count')) + 
+  geom_line(aes(y = output$fit, color = 'Prediction'), linetype = 'F1') +  
+  scale_color_manual(name = element_blank(), labels = c('Count','Prediction'),
+                     values = c('darkred', 'steelblue')) +
+  labs(x = 'Index', y = element_blank())
+
+```
+
+The mean squared error (MSE) for the training data is `r mse_train`.  The MSE for the validation data, or the actual counts minus the predicted counts, is `r mse_valid`.  The relative MSE is `r mse_relative`.  These are all notable signs of a very poor predicting model---the validation MSE is significantly larger than that from the training data.
+
+From the validation plots, it is clear that the counts were systematically underestimated. This is likely the cause of the very large MSE values above.  Reasons for this error are more fully explored in the disucssion, but one potential false assumption may be that the number of users remained constant between the year used for the training data and the year used for the validation data. reason should be we are assuming that the total number of users in 2011 stays the same as in 2012.
+
+\section{Discussion}
+
+The aim of this study was to develop a predictive model to help address the increasing need for bike sharing resources. Such a model could be used to adequately prepare the owners of bike rental spots and those responsible for the city  infrastructure for any upcoming changes in demand for bike sharing services, based on weather and day status data. An immediately noticeable downside in our execution is usage of data from early 2010s, which may not be relevant to the current date. Though the study’s aim was to construct a model that could potentially generate predictions into future years, the age of the data would require such a large extrapolation that the predictions are bound to lose accuracy---this was very clearly seen in the systematic error in the predictions created by the model. In addition, the data trends, including overarching trends, change over time.  As such, a model constructed on older data trends will not incorporate newer ones, and thus will lose a signficant amount of predictive accuracy.
+
+With such problems regarding the age of the data in mind, a more attainable goal of our study is therefore developing a model that is successful in predicting the existing data from the year following the data that it was trained on.  Unfortunately, the success of our model was shown to be limited: the predictions generated for rental counts from 2012 significantly deviated from the actual data. One possible reason for the error is the inclusion of related covariates---from figure \ref{fig:corrmatrix}, it can be seen that there is some notable correlation between predictors.  However, that may not explain the seemingly systematic error in the predictions.  Another potential reason for the observed systematic error may be that our model did not account for potential new users and predicted on the basis of the users from 2011. There is promising potential for improvement on this model if data of growth of the user base could be combined to generate predictions accounting for overarching growth. In fact, a model lacking that sort of data is unlikely to be accurate, especially in the areas where data is dynamic.  Further, the failure of our model provides some insight into the data itself---bike rental counts, given the novelty of the service, may not depend solely on variations on a day-to-day scale, and may also show irregular trends given the many factors at play, such as the changing layout of a city or changing attitudes toward environmentally friendly transportation. 
+
+\section{Appendix}
+
+```{r factor-work, fig.cap = '\\label{fig:workday_inter}Covariate interaction with whether or not a day is a working day.  Note that this factor does not seem to impact the main response variable, count.', fig.width = 6, fig.height = 3}
+
+# names
+name_vector <- c(atemp = 'Temp.', hum = 'Humidity', windspeed = 'Windspd.',
+                 dterel = 'Day', cnt = 'Count')
+
+# plots
+bike_train %>%
+  select(atemp, hum, windspeed, dterel, workingday, cnt) %>% 
+  pivot_longer(cols = c(-workingday), 
+               names_to = 'var', values_to = 'value') %>% 
+  ggplot(aes(x = workingday, y = value, color = workingday)) +
+    geom_boxplot() +
+    facet_wrap(~ var, scales = 'free',
+               labeller = labeller(var = name_vector)) +
+    labs(color = 'Work Day') +
+    theme(axis.title = element_blank(),
+          legend.position = c(0.85, 0.25))
+
+```
+
+```{r factor-weather, fig.cap = '\\label{fig:weather_inter}Covariate interaction with the type of weather: clear, cloudy, or precipitation.', fig.width = 6, fig.height = 3}
+
+# names
+name_vector <- c(atemp = 'Temp.', hum = 'Humidity', windspeed = 'Windspd.',
+                 dterel = 'Day', cnt = 'Count')
+
+# plots
+bike_train %>%
+  select(atemp, hum, windspeed, dterel, weathersit, cnt) %>% 
+  pivot_longer(cols = c(-weathersit), 
+               names_to = 'var', values_to = 'value') %>% 
+  ggplot(aes(x = weathersit, y = value, color = weathersit)) +
+    geom_boxplot() +
+    facet_wrap(~ var, scales = 'free',
+               labeller = labeller(var = name_vector)) +
+    labs(color = 'Weather') +
+    #scale_color_manual(labels = c("T999", "T888")) +
+    theme(axis.title = element_blank(),
+          legend.position = c(0.85, 0.25))
+
+```
+
+```{r histogram, , fig.cap = '\\label{fig:hist}Histogram with frequencies for standardized residuals.  Note the loosely normal distribution.', fig.height = 3, fig.width = 5}
+
+# histogram plot
+ggplot(map = aes(x = rstandard(bike_model))) +
+  geom_histogram(bins = 25, col = 'white', fill = 'grey35', size = 0.25) +
+  labs(x = 'Standardized Residuals', y = 'Frequency')
+
+```
